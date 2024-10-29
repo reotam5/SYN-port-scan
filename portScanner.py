@@ -1,24 +1,32 @@
 from enum import Enum
+from utils.utils import validateIp, validatePort, validatePositive
 from time import sleep
 from scapy.layers.inet import ICMP, IP, TCP
 from scapy.sendrecv import sr1
 import datetime
 from concurrent.futures import ThreadPoolExecutor
+import argparse
 
 
 class PortState(Enum):
     OPEN = "Open"
     CLOSED = "Closed"
     FILTERED = "Filtered"
+    UNKNOWN = "Unknown"
 
 
 class PortScanner():
     def send_syn(self, targetIp: str, port: int, timeout = 2, retry = 1) -> PortState:
         ip = IP(dst=targetIp)
         tcp = TCP(dport=port, flags="S")
-        print("\rScanning port: {port}".format(port = port), end='', flush=True)
+        print("\rScanning port: {port}    ".format(port = port), end='', flush=True)
         res = sr1(ip / tcp, timeout=timeout, verbose=False)
-        if res:
+        if res == None:
+            if retry:
+                return self.send_syn(targetIp, port, timeout, retry - 1) 
+            else:
+                return PortState.FILTERED
+        else:
             if res.haslayer(TCP):
                 tcpRes = res.getlayer(TCP)
                 if tcpRes and tcpRes.flags == "SA":
@@ -27,15 +35,28 @@ class PortScanner():
                     return PortState.CLOSED
             if res.haslayer(ICMP):
                 icmpRes = res.getlayer(ICMP)
-                if icmpRes and icmpRes.type == 3:
+                if icmpRes and icmpRes.type == 3 and icmpRes.code in [1, 2, 3, 9, 10, 13]:
                     return PortState.FILTERED
+        return PortState.UNKNOWN
 
-        if not res and retry:
-            return self.send_syn(targetIp, port, timeout, retry - 1) 
 
-        return PortState.FILTERED
-    
+    def is_up(self, targetIp: str, timeout = 2):
+        ip = IP(dst=targetIp)
+        icmp = ICMP()
+        res = sr1(ip / icmp, timeout = timeout, verbose = False)
+        if res and res.haslayer(ICMP):
+            icmpRes = res.getlayer(ICMP)
+            if icmpRes:
+                if icmpRes and icmpRes.type == 0 and icmpRes.code == 0:
+                    return True
+        return False
+
+
     def scan(self, targetIp: str, start: int = 1, end: int = 65535, delay = 0):
+        if not self.is_up(targetIp):
+            print("Target seems down.")
+            return
+
         openPorts = []
         closedPorts = 0
         filteredPorts = 0
@@ -73,9 +94,41 @@ class PortScanner():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SYN scan ports on a specified host.")
+    parser.add_argument(
+        "targetIp",
+        help="IP address of a machine to perform SYN scan against",
+        type=validateIp
+    )
+    parser.add_argument(
+        "--start",
+        required=False,
+        help="Optionally specify the start port range to SYN scan. Defaults to 1",
+        type=validatePort,
+        default=1
+    )
+    parser.add_argument(
+        "--end",
+        required=False,
+        help="Optionally specify the end port range to SYN scan. Defaults to 65535",
+        type=validatePort,
+        default=65535
+    )
+    parser.add_argument(
+        "--delay",
+        required=False,
+        help="Optionally specify the delay between each scan in milliseconds. Defaults to 0",
+        type=validatePositive,
+        default=0
+    )
+
+    args = parser.parse_args()
+
+    if args.start != None and args.end != None:
+        if args.start > args.end:
+            parser.error("--start cannot be larger than --end")
+
+
     scanner = PortScanner()
-    scanner.scan("10.0.0.58")
-
-
-
+    scanner.scan(args.targetIp, args.start, args.end, args.delay)
 
